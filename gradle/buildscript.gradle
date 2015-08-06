@@ -9,4 +9,5 @@ repositories {
 
 dependencies {
   classpath 'nl.javadude.gradle.plugins:license-gradle-plugin:0.10.0'
+  classpath "org.jfrog.buildinfo:build-info-extractor-gradle:3.1.0"
 }

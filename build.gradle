@@ -14,23 +14,41 @@
 // limitations under the License.
 
 buildscript {
+  def ARTIFACTORY_URL = System.env.ARTIFACTORY_URL 
+  def ARTIFACTORY_REPOSITORY = System.env.ARTIFACTORY_REPOSITORY
+  def ARTIFACTORY_USER = System.env.ARTIFACTORY_USER
+  def ARTIFACTORY_PASSWORD = System.env.ARTIFACTORY_PASSWORD
+
   repositories {
     mavenCentral()
+    jcenter()
+    maven {
+        url "$ARTIFACTORY_URL/plugins-release"
+        credentials {
+            username = "$ARTIFACTORY_USER"
+            password = "$ARTIFACTORY_PASSWORD"
+        }
+    }
   }
+
   apply from: file('gradle/buildscript.gradle'), to: buildscript
+
 }
 
 def slf4jlog4j='org.slf4j:slf4j-log4j12:1.7.6'
 
 allprojects {
   apply plugin: 'idea'
+
   repositories {
     mavenCentral()
+    jcenter()
   }
+
 }
 
 ext {
-    gradleVersion = "2.0"
+    gradleVersion = "2.3"
 }
 
 def isVerificationRequired(project) {
@@ -44,10 +62,41 @@ apply from: file('scala.gradle')
 subprojects {
   apply plugin: 'java'
   apply plugin: 'eclipse'
-  apply plugin: 'maven'
   apply plugin: 'signing'
+  apply plugin: 'maven-publish'
+  apply plugin: 'com.jfrog.artifactory'
 
   licenseTest.onlyIf { isVerificationRequired(project) }
+
+  group = "pubnub"
+  version = "${System.env.VERSION}"
+
+  def ARTIFACTORY_URL = System.env.ARTIFACTORY_URL 
+  def ARTIFACTORY_REPOSITORY = System.env.ARTIFACTORY_REPOSITORY
+  def ARTIFACTORY_USER = System.env.ARTIFACTORY_USER
+  def ARTIFACTORY_PASSWORD = System.env.ARTIFACTORY_PASSWORD
+
+  artifactory {
+    contextUrl = "$ARTIFACTORY_URL"
+    publish {
+        repository {
+            repoKey = "$ARTIFACTORY_REPOSITORY-local"
+            username = "$ARTIFACTORY_USER"
+            password = "$ARTIFACTORY_PASSWORD" 
+            maven = true
+            
+        }
+    }
+    resolve {
+        repository {
+            repoKey = "$ARTIFACTORY_REPOSITORY"
+            username = "$ARTIFACTORY_USER" 
+            password = "$ARTIFACTORY_PASSWORD"
+            maven = true
+            
+        }
+    }
+  }
 
   uploadArchives {
     repositories {
@@ -195,6 +244,7 @@ tasks.create(name: "uploadArchivesAll", dependsOn: ['uploadCoreArchives_2_9_1', 
 
 project(':core') {
   println "Building project 'core' with Scala version $scalaVersion"
+  println "Gradle Version $gradleVersion"
 
   apply plugin: 'scala'
   archivesBaseName = "kafka_${baseScalaVersion}"
@@ -208,6 +258,9 @@ project(':core') {
     compile 'com.101tec:zkclient:0.3'
     compile 'com.yammer.metrics:metrics-core:2.2.0'
     compile 'net.sf.jopt-simple:jopt-simple:3.2'
+
+    compile 'pubnub:pubnub-protobuf:0.1.0-SNAPSHOT'
+    compile 'com.timgroup:java-statsd-client:3.0.1'
 
     testCompile 'junit:junit:4.1'
     testCompile 'org.easymock:easymock:3.0'
@@ -284,6 +337,25 @@ project(':core') {
   artifacts {
     archives testJar
   }
+
+  publishing {
+    publications {
+        mavenTar(MavenPublication) {
+            artifact releaseTarGz
+            artifactId "kafka"
+            groupId "pubnub"
+        }
+    }
+  }
+
+  artifactory {
+    publish {
+        defaults {
+            publications ('mavenTar')
+        }
+    }
+  }
+
 }
 
 project(':contrib:hadoop-consumer') {

@@ -29,14 +29,20 @@ import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 import java.util.concurrent.{BlockingQueue, ArrayBlockingQueue, CountDownLatch, TimeUnit}
 
 import scala.collection.JavaConversions._
+import scala.collection.mutable.Map
 
 import joptsimple.OptionParser
 
-object MirrorMaker extends Logging {
+import com.timgroup.statsd.NonBlockingStatsDClient
+
+import pubnub.protobuf.v1._
+
+object PubNubMirrorMaker extends Logging {
 
   private var connectors: Seq[ZookeeperConsumerConnector] = null
   private var consumerThreads: Seq[ConsumerThread] = null
   private var producerThreads: Seq[ProducerThread] = null
+  private var statsdThread: StatsdThread = null
   private val isShuttingdown: AtomicBoolean = new AtomicBoolean(false)
 
   private val shutdownMessage : ProducerRecord[Array[Byte],Array[Byte]] = new ProducerRecord[Array[Byte],Array[Byte]]("shutdown", "shutdown".getBytes)
@@ -95,6 +101,12 @@ object MirrorMaker extends Logging {
       .describedAs("Java regex (String)")
       .ofType(classOf[String])
 
+    var regionOpt = parser.accepts("region",
+      "Region the mirror maker exists in.")
+      .withRequiredArg()
+      .describedAs("Java regex (String)")
+      .ofType(classOf[String])
+
     val helpOpt = parser.accepts("help", "Print this message.")
     
     if(args.length == 0)
@@ -143,6 +155,9 @@ object MirrorMaker extends Logging {
       new ProducerThread(mirrorDataChannel, producer, i)
     })
 
+    info("constructing statsd thread")
+    statsdThread = new StatsdThread(mirrorDataChannel, numProducers, options.valueOf(regionOpt))
+
     // create consumer threads
     val filterSpec = if (options.has(whitelistOpt))
       new Whitelist(options.valueOf(whitelistOpt))
@@ -166,8 +181,10 @@ object MirrorMaker extends Logging {
       }
     })
 
+
     consumerThreads.foreach(_.start)
     producerThreads.foreach(_.start)
+    statsdThread.start
 
     // we wait on producer's shutdown latch instead of consumers
     // since the consumer threads can hit a timeout/other exception;
@@ -183,6 +200,9 @@ object MirrorMaker extends Logging {
       if (producerThreads != null) {
         producerThreads.foreach(_.shutdown)
         producerThreads.foreach(_.awaitShutdown)
+      }
+      if (statsdThread != null) {
+        statsdThread.interrupt()
       }
       info("Kafka mirror maker shutdown successfully")
     }
@@ -202,6 +222,7 @@ object MirrorMaker extends Logging {
     // time should be discounted by # threads.
     private val waitPut = newMeter("MirrorMaker-DataChannel-WaitOnPut", "percent", TimeUnit.NANOSECONDS)
     private val waitTake = newMeter("MirrorMaker-DataChannel-WaitOnTake", "percent", TimeUnit.NANOSECONDS)
+    private val waitPeek = newMeter("MirrorMaker-DataChannel-WaitOnPeek", "percent", TimeUnit.NANOSECONDS)
     private val channelSizeHist = newHistogram("MirrorMaker-DataChannel-Size")
 
     def put(record: ProducerRecord[Array[Byte],Array[Byte]]) {
@@ -235,6 +256,18 @@ object MirrorMaker extends Logging {
         val startTakeTime = SystemTime.nanoseconds
         data = queue.poll(500, TimeUnit.MILLISECONDS)
         waitTake.mark((SystemTime.nanoseconds - startTakeTime) / numOutputs)
+      }
+      channelSizeHist.update(queue.size)
+      data
+    }
+
+    def peek(queueId: Int): ProducerRecord[Array[Byte],Array[Byte]] = {
+      val queue = queues(queueId)
+      var data: ProducerRecord[Array[Byte],Array[Byte]] = null
+      while (data == null) {
+        val startPeekTime = SystemTime.nanoseconds
+        data = queue.peek()
+        waitPeek.mark((SystemTime.nanoseconds - startPeekTime) / numOutputs)
       }
       channelSizeHist.update(queue.size)
       data
@@ -348,4 +381,44 @@ object MirrorMaker extends Logging {
       }
     }
   }
+
+  class StatsdThread(val dataChannel: DataChannel,
+                     val threadId: Int,
+                     val region: String) extends Thread with Logging{
+
+    private var _stop: Boolean = false
+    private val statsd: NonBlockingStatsDClient = new NonBlockingStatsDClient(region, "localhost", 8125)
+
+    override def run {
+      val is_interupted: Boolean = Thread.currentThread.isInterrupted 
+      info("Starting statsd Process with region %s %s".format(region,is_interupted))
+      while (! is_interupted ) {
+        try {
+          info("Statsd waiting")
+          Thread sleep 1000
+          val data: ProducerRecord[Array[Byte],Array[Byte]] = dataChannel.peek(0)
+          info("Statsd Sending message with value size %d".format(data.value().size))
+          sendToStatsd(data.value()) 
+        } catch {
+          case e: ArrayIndexOutOfBoundsException => {
+            Thread sleep 1000
+          }
+          case t: Throwable => {
+            error("Statsd thread failure due to ", t)
+          }
+        }
+      }
+      info("exiting Statsd thread")
+    }
+
+    def sendToStatsd(raw_msg: Array[Byte]){
+      val wire_message: Protocol.WireMessage = Protocol.WireMessage.parseFrom(raw_msg)
+
+      statsd.count("mirror_maker.total_lines_sampled", 1 )
+      statsd.time("mirror_maker.balancer_time", System.currentTimeMillis - wire_message.getHopTimestamps(0) )
+
+    }
+
+  }
+
 }
