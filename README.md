@@ -11,7 +11,7 @@ You need to have [gradle](http://www.gradle.org/installation) installed.
 Now everything else will work
 
 ### Build and Publish to Artifactory
-    VERSION=X.X.X ./gradlew core:clean core:jar core:generatePomFileForMavenJavaPublication core:artifactoryPublish
+    VERSION=0.8.2.2-SNAPSHOT ./gradlew clean releaseTarGz core:artifactoryPublish
 
 ### Building a jar and running it ###
     ./gradlew jar  
